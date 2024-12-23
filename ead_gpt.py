@@ -1,75 +1,84 @@
-import openai
-from openai import OpenAI
-import json
 import os
+import json
 import csv
-from PyPDF2 import PdfReader
-from pdf2image import convert_from_path
-from pytesseract import image_to_string
+from openai import OpenAI
+
+TITULO_PROPIEDAD_VEHICULO = "titulo_propiedad_vehiculo"
+REGISTRO_SANITARIO_VEHICULO = "registro_sanitario_vehiculo"
 
 # Set your API key
+#api_key = ""
 client = OpenAI(api_key=api_key)
 
-def extract_text_from_pdf2(pdf_path: str) -> str:
-    with open(pdf_path, 'rb') as pdf_file:
-        # Read and extract text
-        reader = PdfReader(pdf_file)
-        extracted_text = ""
-        for page in reader.pages:
-            extracted_text += page.extract_text() + "\n"
-        return extracted_text.strip()
-    
-def extract_text_from_image_pdf(pdf_path):
-    # Convert PDF to images
-    images = convert_from_path(pdf_path)
-    text = ""
-    for image in images:
-        # OCR the image
-        text += image_to_string(image)
-    return text
-
-def write_prompt(text: str) -> str:
-    prompt = f"""Por favor, extrae la siguiente información del [TEXTO] de un documento PDF en formato JSON (nota que algunos campos puede que estén vacíos):
-                nombre,
-                cedula_rif,
-                placa,
-                serial_NIV,
-                serial_carroceria,
-                serial_chasis,
-                serial_motor,
-                tc,
-                marca,
-                modelo,
-                color,
-                ano_fabricacion,
-                ano_modelo,
-                clase,
-                tipo,
-                uso,
-                nro_puestos,
-                nro_ejes,
-                tara,
-                cap_carga:
-                servicio,
-                fecha,
-                intt_nro
-                
-                
-                [TEXTO]:
-                {text}"""
-    return prompt
-
-def call_openai_api(prompt: str):
+def call_openai_api(prompt: str, file_url: str = str):
     # Call the API
     completion = client.chat.completions.create(
-        model="gpt-4o-mini",  # Replace with your desired model (e.g., gpt-4o or another version)
+        model="gpt-4o-mini",
         messages=[
-            {"role": "developer", "content": "Eres un asistente útil para extraer información de documentos."},
-            {"role": "user", "content": prompt}
-        ]
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": f"{prompt}"},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"{file_url}",
+                        }
+                    },
+                ],
+            }
+        ],
+        max_tokens=300,
     )
 
-    return completion.choices[0].message.content
+    content = completion.choices[0].message.content
+
+    return content
+
+def extract_info_from_pdf(file_url: str, file_type: str) -> str:
+
+    if file_type == TITULO_PROPIEDAD_VEHICULO:
+        fields = f"""
+            nombre,
+            cedula_rif,
+            placa,
+            serial_NIV,
+            serial_carroceria,
+            serial_chasis,
+            serial_motor,
+            tc,
+            marca,
+            modelo,
+            color,
+            ano_fabricacion,
+            ano_modelo,
+            clase,
+            tipo,
+            uso,
+            nro_puestos,
+            nro_ejes,
+            tara,
+            cap_carga:
+            servicio,
+            fecha,
+            intt_nro
+        """
+    elif file_type == REGISTRO_SANITARIO_VEHICULO:
+        fields = f"""
+            psn,
+            solicitante,
+            fecha,
+            nro_solicitud,
+            fecha,
+            placa
+        """
+
+    prompt = f"""
+        Por favor, extrae la siguiente información del de la imagen proporcionada en el URL en formato JSON (nota que algunos campos puede que estén vacíos):
+
+        {fields}
+    """
+    return parse_response(call_openai_api(prompt, file_url))
 
 def parse_response(response):
     try:
@@ -88,42 +97,37 @@ def save_to_csv(data, csv_path):
         return
 
     # Extract column names from the first item in the data dictionary
-    columns = ["pdf_file"] + list(next(iter(data.values())).keys())
+    columns = ["pdf_file"] + list(next(iter(data.values())).keys()) if data else []
 
     file_exists = os.path.isfile(csv_path)
     with open(csv_path, mode='a', newline='') as file:
         writer = csv.DictWriter(file, fieldnames=columns)
-        if not file_exists:
+        if not file_exists and columns:
             writer.writeheader()
         for pdf_file, item in data.items():
             item["pdf_file"] = pdf_file
             writer.writerow(item)
 
-def main(pdf_files, csv_path):
-    all_data = {}
-    for pdf_path in pdf_files:
-        text = extract_text_from_image_pdf(pdf_path)
-        print(f"Extracted text from {pdf_path}:")
-        print(text)
-        print("Calling OpenAI API...")
-        prompt = write_prompt(text)
-        response = call_openai_api(prompt)
-        print(response)
-        parsed_response = parse_response(response)
-        if parsed_response:
-            print(f"Extracted Information from {pdf_path}:")
-            print(json.dumps(parsed_response, indent=4))
-            all_data[pdf_path] = parsed_response
-        else:
-            print(f"Failed to extract information from {pdf_path}.")
-    if all_data:
-        save_to_csv(all_data, csv_path)
+def main():
+    base_url = 'https://raw.githubusercontent.com/f-yanez/ead/refs/heads/main/files/'
+    files_folder = 'files/'
+    
+    files_list = [
+        base_url + file_name for file_name in os.listdir(files_folder) if file_name.endswith('.png')
+    ]
+
+    for file_url in files_list:
+        all_data = {}
+        if file_url.endswith('.png'):
+            file_name = file_url.split('/')[-1]
+            file_type = file_name.split('-')[0]
+            extracted_info_json = extract_info_from_pdf(file_url, file_type)
+            if extracted_info_json:
+                print(json.dumps(extracted_info_json, indent=4))
+                all_data[file_name] = extracted_info_json
+                save_to_csv(all_data, f"extracted_{file_type}.csv")
+            else:
+                print(f"Failed to extract information from {file_name}.")
 
 if __name__ == "__main__":
-    # Create a list of all PDF files in the "files" folder
-    pdf_folder = "files"
-    pdf_files = [os.path.join(pdf_folder, f) for f in os.listdir(pdf_folder) if f.endswith('.pdf')]
-
-    # Save the results to a single CSV file
-    csv_path = "output.csv"
-    main(pdf_files, csv_path)
+    main()
